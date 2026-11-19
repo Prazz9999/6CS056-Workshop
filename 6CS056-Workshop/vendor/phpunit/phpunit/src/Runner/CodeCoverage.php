@@ -9,39 +9,39 @@
  */
 namespace PHPUnit\Runner;
 
+use const PHP_OS_FAMILY;
 use function assert;
-use function class_exists;
+use function file_put_contents;
 use function implode;
-use function is_subclass_of;
 use function sprintf;
 use function sys_get_temp_dir;
-use DateTimeImmutable;
 use PHPUnit\Event\Facade as EventFacade;
 use PHPUnit\Framework\TestCase;
 use PHPUnit\TextUI\Configuration\CodeCoverageFilterRegistry;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Output\Printer;
 use PHPUnit\Util\Filesystem;
-use ReflectionClass;
 use SebastianBergmann\CodeCoverage\Driver\Driver;
-use SebastianBergmann\CodeCoverage\Driver\Granularity;
 use SebastianBergmann\CodeCoverage\Driver\Selector;
 use SebastianBergmann\CodeCoverage\Exception as CodeCoverageException;
 use SebastianBergmann\CodeCoverage\Filter;
-use SebastianBergmann\CodeCoverage\Report\Facade as ReportFacade;
+use SebastianBergmann\CodeCoverage\Report\Clover as CloverReport;
+use SebastianBergmann\CodeCoverage\Report\Cobertura as CoberturaReport;
+use SebastianBergmann\CodeCoverage\Report\Crap4j as Crap4jReport;
 use SebastianBergmann\CodeCoverage\Report\Html\Colors;
 use SebastianBergmann\CodeCoverage\Report\Html\CustomCssFile;
-use SebastianBergmann\CodeCoverage\Report\Html\Views;
+use SebastianBergmann\CodeCoverage\Report\Html\Facade as HtmlReport;
+use SebastianBergmann\CodeCoverage\Report\OpenClover as OpenCloverReport;
+use SebastianBergmann\CodeCoverage\Report\PHP as PhpReport;
+use SebastianBergmann\CodeCoverage\Report\Text as TextReport;
 use SebastianBergmann\CodeCoverage\Report\Thresholds;
-use SebastianBergmann\CodeCoverage\Serialization\Serializer;
+use SebastianBergmann\CodeCoverage\Report\Xml\Facade as XmlReport;
 use SebastianBergmann\CodeCoverage\StaticAnalysis\CacheWarmer;
 use SebastianBergmann\CodeCoverage\Test\Target\TargetCollection;
 use SebastianBergmann\CodeCoverage\Test\Target\ValidationFailure;
-use SebastianBergmann\CodeCoverage\Test\TestSize;
-use SebastianBergmann\CodeCoverage\Test\TestStatus;
-use SebastianBergmann\CodeCoverage\Version as CodeCoverageVersion;
+use SebastianBergmann\CodeCoverage\Test\TestSize\TestSize;
+use SebastianBergmann\CodeCoverage\Test\TestStatus\TestStatus;
 use SebastianBergmann\Comparator\Comparator;
-use SebastianBergmann\Environment\Runtime;
 use SebastianBergmann\Timer\NoActiveTimerException;
 use SebastianBergmann\Timer\Timer;
 
@@ -60,14 +60,10 @@ final class CodeCoverage
     /**
      * @phpstan-ignore property.internalClass
      */
-    private ?Driver $driver                     = null;
-    private bool $collecting                    = false;
-    private ?TestCase $test                     = null;
-    private ?Timer $timer                       = null;
-    private bool $requireCoverageContribution   = false;
-    private bool $lastTestContributedToCoverage = false;
-    private bool $collectsBranchCoverage        = false;
-    private bool $collectsPathCoverage          = false;
+    private ?Driver $driver  = null;
+    private bool $collecting = false;
+    private ?TestCase $test  = null;
+    private ?Timer $timer    = null;
 
     public static function instance(): self
     {
@@ -80,24 +76,13 @@ final class CodeCoverage
 
     public function init(Configuration $configuration, CodeCoverageFilterRegistry $codeCoverageFilterRegistry, bool $extensionRequiresCodeCoverageCollection): CodeCoverageInitializationStatus
     {
-        $codeCoverageFilterRegistry->init($configuration, $extensionRequiresCodeCoverageCollection);
+        $codeCoverageFilterRegistry->init($configuration);
 
         if (!$configuration->hasCoverageReport() && !$extensionRequiresCodeCoverageCollection) {
             return CodeCoverageInitializationStatus::NOT_REQUESTED;
         }
 
-        $coverageDriver = null;
-
-        if ($configuration->hasCoverageDriver()) {
-            $coverageDriver = $configuration->coverageDriver();
-        }
-
-        $this->activate(
-            $codeCoverageFilterRegistry->get(),
-            $configuration->branchCoverage(),
-            $configuration->pathCoverage(),
-            $coverageDriver,
-        );
+        $this->activate($codeCoverageFilterRegistry->get(), $configuration->pathCoverage());
 
         if (!$this->isActive()) {
             return CodeCoverageInitializationStatus::FAILED;
@@ -106,9 +91,9 @@ final class CodeCoverage
         if ($configuration->hasCoverageCacheDirectory()) {
             $coverageCacheDirectory = $configuration->coverageCacheDirectory();
         } else {
-            $candidate = sys_get_temp_dir() . '/phpunit-code-coverage-cache';
+            $candidate = $this->temporaryCoverageCacheDirectory();
 
-            if (Filesystem::createDirectory($candidate)) {
+            if ($candidate !== false) {
                 $coverageCacheDirectory = $candidate;
             }
         }
@@ -140,8 +125,6 @@ final class CodeCoverage
         } else {
             $this->codeCoverage()->excludeUncoveredFiles();
         }
-
-        $this->requireCoverageContribution = $configuration->requireCoverageContribution();
 
         $this->warnIfFilterIsNotConfigured($codeCoverageFilterRegistry, $configuration);
 
@@ -175,8 +158,6 @@ final class CodeCoverage
 
     public function codeCoverage(): \SebastianBergmann\CodeCoverage\CodeCoverage
     {
-        assert($this->codeCoverage !== null);
-
         return $this->codeCoverage;
     }
 
@@ -185,16 +166,7 @@ final class CodeCoverage
      */
     public function driverNameAndVersion(): string
     {
-        assert($this->driver !== null);
-
-        /** @phpstan-ignore method.internalClass */
-        $nameAndVersion = $this->driver->nameAndVersion();
-
-        if ($nameAndVersion === '') {
-            return 'unknown';
-        }
-
-        return $nameAndVersion;
+        return $this->driver->nameAndVersion();
     }
 
     public function start(TestCase $test): void
@@ -203,19 +175,17 @@ final class CodeCoverage
             return;
         }
 
-        $size = TestSize::Unknown;
+        $size = TestSize::unknown();
 
         if ($test->size()->isSmall()) {
-            $size = TestSize::Small;
+            $size = TestSize::small();
         } elseif ($test->size()->isMedium()) {
-            $size = TestSize::Medium;
+            $size = TestSize::medium();
         } elseif ($test->size()->isLarge()) {
-            $size = TestSize::Large;
+            $size = TestSize::large();
         }
 
         $this->test = $test;
-
-        assert($this->codeCoverage !== null);
 
         $this->codeCoverage->start(
             $test->valueObjectForEvents()->id(),
@@ -233,17 +203,16 @@ final class CodeCoverage
             return;
         }
 
-        assert($this->codeCoverage !== null);
-        assert($this->test !== null);
-
         $time             = $this->timer()->stop()->asSeconds();
-        $status           = TestStatus::Unknown;
+        $status           = TestStatus::unknown();
         $this->collecting = false;
 
-        if ($this->test->status()->isSuccess()) {
-            $status = TestStatus::Success;
-        } else {
-            $status = TestStatus::Failure;
+        if ($this->test !== null) {
+            if ($this->test->status()->isSuccess()) {
+                $status = TestStatus::success();
+            } else {
+                $status = TestStatus::failure();
+            }
         }
 
         if ($covers instanceof TargetCollection) {
@@ -276,49 +245,16 @@ final class CodeCoverage
             }
         }
 
-        $rawData = $this->codeCoverage->stop($append, $status, $covers, $uses, $time);
-
-        if ($this->requireCoverageContribution) {
-            $this->lastTestContributedToCoverage = false;
-
-            /** @phpstan-ignore method.internalClass */
-            foreach ($rawData->lineCoverage() as $lines) {
-                foreach ($lines as $lineStatus) {
-                    /** @phpstan-ignore classConstant.internalClass */
-                    if ($lineStatus === Driver::LINE_EXECUTED) {
-                        $this->lastTestContributedToCoverage = true;
-
-                        break 2;
-                    }
-                }
-            }
-        }
+        $this->codeCoverage->stop($append, $status, $covers, $uses, $time);
 
         $this->test = null;
     }
 
-    public function lastTestContributedToCoverage(): bool
-    {
-        return $this->lastTestContributedToCoverage;
-    }
-
     public function deactivate(): void
     {
-        $this->driver                 = null;
-        $this->codeCoverage           = null;
-        $this->test                   = null;
-        $this->collectsBranchCoverage = false;
-        $this->collectsPathCoverage   = false;
-    }
-
-    public function collectsBranchCoverage(): bool
-    {
-        return $this->collectsBranchCoverage;
-    }
-
-    public function collectsPathCoverage(): bool
-    {
-        return $this->collectsPathCoverage;
+        $this->driver       = null;
+        $this->codeCoverage = null;
+        $this->test         = null;
     }
 
     public function generateReports(Printer $printer, Configuration $configuration): void
@@ -330,24 +266,28 @@ final class CodeCoverage
         if ($configuration->hasCoveragePhp()) {
             $this->codeCoverageGenerationStart($printer, 'PHP');
 
-            $serializer = new Serializer;
+            try {
+                $writer = new PhpReport;
+                $writer->process($this->codeCoverage(), $configuration->coveragePhp());
 
-            $serializer->serialize($configuration->coveragePhp(), $this->codeCoverage(), $configuration->includeGitInformation());
+                $this->codeCoverageGenerationSucceeded($printer);
 
-            $this->codeCoverageGenerationSucceeded($printer);
-
-            unset($serializer);
+                unset($writer);
+            } catch (CodeCoverageException $e) {
+                $this->codeCoverageGenerationFailed($printer, $e);
+            }
         }
-
-        $facade = ReportFacade::fromObject($this->codeCoverage());
 
         if ($configuration->hasCoverageClover()) {
             $this->codeCoverageGenerationStart($printer, 'Clover XML');
 
             try {
-                $facade->renderClover($configuration->coverageClover(), 'Clover Coverage');
+                $writer = new CloverReport;
+                $writer->process($this->codeCoverage(), $configuration->coverageClover(), 'Clover Coverage');
 
                 $this->codeCoverageGenerationSucceeded($printer);
+
+                unset($writer);
             } catch (CodeCoverageException $e) {
                 $this->codeCoverageGenerationFailed($printer, $e);
             }
@@ -357,9 +297,12 @@ final class CodeCoverage
             $this->codeCoverageGenerationStart($printer, 'OpenClover XML');
 
             try {
-                $facade->renderOpenClover($configuration->coverageOpenClover(), 'OpenClover Coverage');
+                $writer = new OpenCloverReport;
+                $writer->process($this->codeCoverage(), $configuration->coverageOpenClover(), 'OpenClover Coverage');
 
                 $this->codeCoverageGenerationSucceeded($printer);
+
+                unset($writer);
             } catch (CodeCoverageException $e) {
                 $this->codeCoverageGenerationFailed($printer, $e);
             }
@@ -369,9 +312,12 @@ final class CodeCoverage
             $this->codeCoverageGenerationStart($printer, 'Cobertura XML');
 
             try {
-                $facade->renderCobertura($configuration->coverageCobertura());
+                $writer = new CoberturaReport;
+                $writer->process($this->codeCoverage(), $configuration->coverageCobertura());
 
                 $this->codeCoverageGenerationSucceeded($printer);
+
+                unset($writer);
             } catch (CodeCoverageException $e) {
                 $this->codeCoverageGenerationFailed($printer, $e);
             }
@@ -381,9 +327,12 @@ final class CodeCoverage
             $this->codeCoverageGenerationStart($printer, 'Crap4J XML');
 
             try {
-                $facade->renderCrap4j($configuration->coverageCrap4j(), $configuration->coverageCrap4jThreshold());
+                $writer = new Crap4jReport($configuration->coverageCrap4jThreshold());
+                $writer->process($this->codeCoverage(), $configuration->coverageCrap4j());
 
                 $this->codeCoverageGenerationSucceeded($printer);
+
+                unset($writer);
             } catch (CodeCoverageException $e) {
                 $this->codeCoverageGenerationFailed($printer, $e);
             }
@@ -399,75 +348,50 @@ final class CodeCoverage
                     $customCssFile = CustomCssFile::from($configuration->coverageHtmlCustomCssFile());
                 }
 
-                if ($configuration->coverageHtmlClassView() && $configuration->coverageHtmlFileView()) {
-                    $views = Views::FileViewAndClassView;
-                } elseif ($configuration->coverageHtmlClassView()) {
-                    $views = Views::OnlyClassView;
-                } else {
-                    $views = Views::OnlyFileView;
-                }
-
-                $facade->renderHtml(
-                    $configuration->coverageHtml(),
+                $writer = new HtmlReport(
                     sprintf(
                         ' and <a href="https://phpunit.de/">PHPUnit %s</a>',
                         Version::id(),
                     ),
                     Colors::from(
                         $configuration->coverageHtmlColorSuccessLow(),
-                        $configuration->coverageHtmlColorSuccessLowDark(),
                         $configuration->coverageHtmlColorSuccessMedium(),
-                        $configuration->coverageHtmlColorSuccessMediumDark(),
                         $configuration->coverageHtmlColorSuccessHigh(),
-                        $configuration->coverageHtmlColorSuccessHighDark(),
-                        $configuration->coverageHtmlColorSuccessBar(),
-                        $configuration->coverageHtmlColorSuccessBarDark(),
                         $configuration->coverageHtmlColorWarning(),
-                        $configuration->coverageHtmlColorWarningDark(),
-                        $configuration->coverageHtmlColorWarningBar(),
-                        $configuration->coverageHtmlColorWarningBarDark(),
                         $configuration->coverageHtmlColorDanger(),
-                        $configuration->coverageHtmlColorDangerDark(),
-                        $configuration->coverageHtmlColorDangerBar(),
-                        $configuration->coverageHtmlColorDangerBarDark(),
-                        $configuration->coverageHtmlColorBreadcrumbs(),
-                        $configuration->coverageHtmlColorBreadcrumbsDark(),
                     ),
                     Thresholds::from(
                         $configuration->coverageHtmlLowUpperBound(),
                         $configuration->coverageHtmlHighLowerBound(),
                     ),
                     $customCssFile,
-                    $views,
                 );
 
+                $writer->process($this->codeCoverage(), $configuration->coverageHtml());
+
                 $this->codeCoverageGenerationSucceeded($printer);
+
+                unset($writer);
             } catch (CodeCoverageException $e) {
                 $this->codeCoverageGenerationFailed($printer, $e);
             }
         }
 
         if ($configuration->hasCoverageText()) {
+            $processor = new TextReport(
+                Thresholds::default(),
+                $configuration->coverageTextShowUncoveredFiles(),
+                $configuration->coverageTextShowOnlySummary(),
+            );
+
+            $textReport = $processor->process($this->codeCoverage(), $configuration->colors());
+
             if ($configuration->coverageText() === 'php://stdout') {
                 if (!$configuration->noOutput() && !$configuration->debug()) {
-                    $printer->print(
-                        $facade->renderText(
-                            null,
-                            Thresholds::default(),
-                            $configuration->coverageTextShowUncoveredFiles(),
-                            $configuration->coverageTextShowOnlySummary(),
-                            $configuration->colors(),
-                        ),
-                    );
+                    $printer->print($textReport);
                 }
             } else {
-                $facade->renderText(
-                    $configuration->coverageText(),
-                    Thresholds::default(),
-                    $configuration->coverageTextShowUncoveredFiles(),
-                    $configuration->coverageTextShowOnlySummary(),
-                    $configuration->colors(),
-                );
+                file_put_contents($configuration->coverageText(), $textReport);
             }
         }
 
@@ -475,41 +399,15 @@ final class CodeCoverage
             $this->codeCoverageGenerationStart($printer, 'PHPUnit XML');
 
             try {
-                /** @phpstan-ignore method.internal */
-                $driverInformation = $this->codeCoverage()->driverInformation();
-
-                $facade->renderXml(
-                    $configuration->coverageXml(),
-                    $configuration->coverageXmlIncludeSource(),
-                    new Runtime,
-                    new DateTimeImmutable,
-                    Version::id(),
-                    CodeCoverageVersion::id(),
-                    $driverInformation['name'],
-                    $driverInformation['version'],
-                );
+                $writer = new XmlReport(Version::id(), $configuration->coverageXmlIncludeSource());
+                $writer->process($this->codeCoverage(), $configuration->coverageXml());
 
                 $this->codeCoverageGenerationSucceeded($printer);
+
+                unset($writer);
             } catch (CodeCoverageException $e) {
                 $this->codeCoverageGenerationFailed($printer, $e);
             }
-        }
-    }
-
-    public function warnAboutFilesThatCouldNotBeParsed(): void
-    {
-        if (!$this->isActive()) {
-            return;
-        }
-
-        foreach ($this->codeCoverage->parseErrors() as $file => $message) {
-            EventFacade::emitter()->testRunnerTriggeredPhpunitWarning(
-                sprintf(
-                    'Cannot parse %s (%s), code coverage for this file is based on raw data reported by the code coverage driver',
-                    $file,
-                    $message,
-                ),
-            );
         }
     }
 
@@ -549,96 +447,65 @@ final class CodeCoverage
         $this->deactivate();
     }
 
-    private function activate(Filter $filter, bool $branchCoverage, bool $pathCoverage, ?string $driverClass = null): void
+    private function activate(Filter $filter, bool $pathCoverage): void
     {
         try {
-            $granularity = Granularity::Line;
-
-            if ($branchCoverage) {
-                $granularity = Granularity::LineAndBranch;
-            }
-
             if ($pathCoverage) {
-                $branchCoverage = true;
-                $granularity    = Granularity::LineBranchAndPath;
-            }
-
-            if ($driverClass !== null) {
-                $this->driver = $this->instantiateDriver($driverClass, $filter, $granularity);
+                $this->driver = (new Selector)->forLineAndPathCoverage($filter);
             } else {
-                $this->driver = (new Selector)->select($filter, $granularity);
+                $this->driver = (new Selector)->forLineCoverage($filter);
             }
 
             $this->codeCoverage = new \SebastianBergmann\CodeCoverage\CodeCoverage(
                 $this->driver,
                 $filter,
             );
-
-            $this->collectsBranchCoverage = $branchCoverage;
-            $this->collectsPathCoverage   = $pathCoverage;
         } catch (CodeCoverageException $e) {
-            $message = $e->getMessage();
-
-            if ($message === '') {
-                $message = 'Code coverage cannot be initialized';
-            }
-
-            EventFacade::emitter()->testRunnerTriggeredPhpunitWarning($message);
+            EventFacade::emitter()->testRunnerTriggeredPhpunitWarning(
+                $e->getMessage(),
+            );
         }
     }
 
     /**
-     * @phpstan-ignore return.internalClass
+     * The directory below the operating system's path used for temporary
+     * files that is used for caching information from static analysis when
+     * no cache directory is configured.
+     *
+     * The path used for temporary files can be shared between users, for
+     * instance /tmp on Linux. Another user must not be able to control the
+     * cached information, so the directory is specific to the current user
+     * and is only used when no other user can write to it.
+     *
+     * @return false|non-empty-string
      */
-    private function instantiateDriver(string $driverClass, Filter $filter, Granularity $granularity): Driver
+    private function temporaryCoverageCacheDirectory(): false|string
     {
-        if (!class_exists($driverClass)) {
-            throw new CodeCoverageDriverException(
-                sprintf(
-                    'Configured code coverage driver class "%s" does not exist',
-                    $driverClass,
-                ),
-            );
+        if (PHP_OS_FAMILY === 'Windows') {
+            // By default, the path used for temporary files is specific to
+            // the current user on Windows
+            $directory = sys_get_temp_dir() . '/phpunit-code-coverage-cache';
+
+            if (Filesystem::createDirectory($directory)) {
+                return $directory;
+            }
+
+            return false;
         }
 
-        /** @phpstan-ignore classConstant.internalClass */
-        if (!is_subclass_of($driverClass, Driver::class)) {
-            throw new CodeCoverageDriverException(
-                sprintf(
-                    'Configured code coverage driver class "%s" does not extend %s',
-                    $driverClass,
-                    /** @phpstan-ignore classConstant.internalClass */
-                    Driver::class,
-                ),
-            );
+        $userId = Filesystem::currentUserId();
+
+        if ($userId === false) {
+            return false;
         }
 
-        $reflection = new ReflectionClass($driverClass);
+        $directory = sys_get_temp_dir() . '/phpunit-code-coverage-cache-' . $userId;
 
-        if (!$reflection->isInstantiable()) {
-            throw new CodeCoverageDriverException(
-                sprintf(
-                    'Configured code coverage driver class "%s" is not instantiable',
-                    $driverClass,
-                ),
-            );
+        if (Filesystem::createPrivateDirectory($directory, $userId)) {
+            return $directory;
         }
 
-        $constructor = $reflection->getConstructor();
-
-        if ($constructor !== null && $constructor->getNumberOfRequiredParameters() > 0) {
-            $driver = $reflection->newInstance($filter);
-        } else {
-            $driver = $reflection->newInstance();
-        }
-
-        /** @phpstan-ignore instanceof.internalClass */
-        assert($driver instanceof Driver);
-
-        /** @phpstan-ignore method.internalClass */
-        $driver->setGranularity($granularity);
-
-        return $driver;
+        return false;
     }
 
     private function codeCoverageGenerationStart(Printer $printer, string $format): void

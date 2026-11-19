@@ -17,7 +17,7 @@ namespace PHPUnit\Metadata;
 final readonly class RequiresMethod extends Metadata
 {
     /**
-     * @var class-string
+     * @var non-empty-string
      */
     private string $className;
 
@@ -27,10 +27,11 @@ final readonly class RequiresMethod extends Metadata
     private string $methodName;
 
     /**
-     * @param class-string     $className
+     * @param int<0, 1>        $level
+     * @param non-empty-string $className
      * @param non-empty-string $methodName
      */
-    protected function __construct(Level $level, string $className, string $methodName)
+    protected function __construct(int $level, string $className, string $methodName)
     {
         parent::__construct($level);
 
@@ -44,7 +45,7 @@ final readonly class RequiresMethod extends Metadata
     }
 
     /**
-     * @return class-string
+     * @return non-empty-string
      */
     public function className(): string
     {
