@@ -7,12 +7,11 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  */
-namespace PHPUnit\Framework\TestRunner;
+namespace PHPUnit\Framework;
 
 use function assert;
 use function hash_equals;
-use function is_int;
-use function property_exists;
+use function sprintf;
 use function strlen;
 use function substr;
 use function trim;
@@ -20,18 +19,10 @@ use function unserialize;
 use PHPUnit\Event\Code\TestMethodBuilder;
 use PHPUnit\Event\Code\ThrowableBuilder;
 use PHPUnit\Event\Emitter;
-use PHPUnit\Event\EventCollection;
 use PHPUnit\Event\Facade;
-use PHPUnit\Event\TestRunner\ChildProcessReason;
-use PHPUnit\Framework\AssertionFailedError;
-use PHPUnit\Framework\Exception;
-use PHPUnit\Framework\Test;
-use PHPUnit\Framework\TestCase;
-use PHPUnit\Framework\TestStatus\TestStatus;
 use PHPUnit\Runner\CodeCoverage;
-use PHPUnit\TestRunner\TestResult\Facade as TestResultFacade;
 use PHPUnit\TestRunner\TestResult\PassedTests;
-use stdClass;
+use Throwable;
 
 /**
  * @no-named-arguments Parameter names are not covered by the backward compatibility promise for PHPUnit
@@ -56,23 +47,10 @@ final readonly class ChildProcessResultProcessor
      */
     public function process(Test $test, string $serializedProcessResult, string $stderr, ?string $processResultNonce = null): void
     {
-        if (TestResultFacade::wasInterrupted()) {
-            assert($test instanceof TestCase);
-
-            $this->emitter->testFinished(
-                TestMethodBuilder::fromTestCase($test),
-                0,
-            );
-
-            return;
-        }
-
         if ($stderr !== '') {
             $exception = new Exception(trim($stderr));
 
             assert($test instanceof TestCase);
-
-            $test->setStatus(TestStatus::error($exception->getMessage()));
 
             $this->emitter->testErrored(
                 TestMethodBuilder::fromTestCase($test),
@@ -87,15 +65,13 @@ final readonly class ChildProcessResultProcessor
 
             if (strlen($serializedProcessResult) < $nonceLength ||
                 !hash_equals($processResultNonce, substr($serializedProcessResult, 0, $nonceLength))) {
-                $message = 'Test was run in child process and the result file was tampered with or written by an unexpected process';
+                $this->emitter->childProcessErrored();
 
-                $this->emitter->childProcessErrored(ChildProcessReason::TestRequiringProcessIsolation, $message);
-
-                $exception = new AssertionFailedError($message);
+                $exception = new AssertionFailedError(
+                    'Test was run in child process and the result file was tampered with or written by an unexpected process',
+                );
 
                 assert($test instanceof TestCase);
-
-                $test->setStatus(TestStatus::error($exception->getMessage()));
 
                 $this->emitter->testErrored(
                     TestMethodBuilder::fromTestCase($test),
@@ -113,28 +89,44 @@ final readonly class ChildProcessResultProcessor
             $serializedProcessResult = substr($serializedProcessResult, $nonceLength);
         }
 
-        $childResult = @unserialize($serializedProcessResult);
+        try {
+            $childResult = @unserialize($serializedProcessResult);
+        } catch (Throwable $t) {
+            // An object can only be unserialized when its class exists in this
+            // process: an object of a test double class, which only exists in
+            // the child process, cannot be assigned to a property whose type it
+            // was declared to satisfy, for instance an object that a test
+            // returned and that holds a test double.
+            $this->emitter->childProcessErrored();
 
-        if (!$childResult instanceof stdClass ||
-            !property_exists($childResult, 'events') ||
-            !property_exists($childResult, 'passedTests') ||
-            !property_exists($childResult, 'testResult') ||
-            !property_exists($childResult, 'status') ||
-            !property_exists($childResult, 'numAssertions') ||
-            !$childResult->events instanceof EventCollection ||
-            !$childResult->passedTests instanceof PassedTests ||
-            !$childResult->status instanceof TestStatus ||
-            !is_int($childResult->numAssertions) ||
-            $childResult->numAssertions < 0) {
-            $message = 'Test was run in child process and ended unexpectedly';
-
-            $this->emitter->childProcessErrored(ChildProcessReason::TestRequiringProcessIsolation, $message);
-
-            $exception = new AssertionFailedError($message);
+            $exception = new AssertionFailedError(
+                sprintf(
+                    'Test was run in child process and its result could not be unserialized: %s',
+                    $t->getMessage(),
+                ),
+            );
 
             assert($test instanceof TestCase);
 
-            $test->setStatus(TestStatus::error($exception->getMessage()));
+            $this->emitter->testErrored(
+                TestMethodBuilder::fromTestCase($test),
+                ThrowableBuilder::from($exception),
+            );
+
+            $this->emitter->testFinished(
+                TestMethodBuilder::fromTestCase($test),
+                0,
+            );
+
+            return;
+        }
+
+        if ($childResult === false) {
+            $this->emitter->childProcessErrored();
+
+            $exception = new AssertionFailedError('Test was run in child process and ended unexpectedly');
+
+            assert($test instanceof TestCase);
 
             $this->emitter->testErrored(
                 TestMethodBuilder::fromTestCase($test),
@@ -155,18 +147,24 @@ final readonly class ChildProcessResultProcessor
         assert($test instanceof TestCase);
 
         $test->setResult($childResult->testResult);
-        $test->setStatus($childResult->status);
         $test->addToAssertionCount($childResult->numAssertions);
 
         if (!$this->codeCoverage->isActive()) {
             return;
         }
 
-        // @codeCoverageIgnoreStart
-        if (!isset($childResult->codeCoverage) || !$childResult->codeCoverage instanceof \SebastianBergmann\CodeCoverage\CodeCoverage) {
+        if (!$childResult->codeCoverage instanceof \SebastianBergmann\CodeCoverage\CodeCoverage) {
+            $this->emitter->testRunnerTriggeredPhpunitWarning(
+                sprintf(
+                    'Code coverage could not be collected for %s',
+                    TestMethodBuilder::fromTestCase($test)->id(),
+                ),
+            );
+
             return;
         }
 
+        // @codeCoverageIgnoreStart
         CodeCoverage::instance()->codeCoverage()->merge(
             $childResult->codeCoverage,
         );

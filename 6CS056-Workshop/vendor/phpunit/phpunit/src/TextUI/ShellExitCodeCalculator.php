@@ -57,34 +57,6 @@ final readonly class ShellExitCodeCalculator
             $failOnDeprecation = false;
         }
 
-        $failOnSelfDeprecation     = $failOnDeprecation;
-        $failOnDirectDeprecation   = $failOnDeprecation;
-        $failOnIndirectDeprecation = $failOnDeprecation;
-
-        if ($configuration->failOnSelfDeprecation()) {
-            $failOnSelfDeprecation = true;
-        }
-
-        if ($configuration->doNotFailOnSelfDeprecation()) {
-            $failOnSelfDeprecation = false;
-        }
-
-        if ($configuration->failOnDirectDeprecation()) {
-            $failOnDirectDeprecation = true;
-        }
-
-        if ($configuration->doNotFailOnDirectDeprecation()) {
-            $failOnDirectDeprecation = false;
-        }
-
-        if ($configuration->failOnIndirectDeprecation()) {
-            $failOnIndirectDeprecation = true;
-        }
-
-        if ($configuration->doNotFailOnIndirectDeprecation()) {
-            $failOnIndirectDeprecation = false;
-        }
-
         if ($configuration->failOnPhpunitDeprecation()) {
             $failOnPhpunitDeprecation = true;
         }
@@ -167,19 +139,7 @@ final readonly class ShellExitCodeCalculator
             $returnCode = self::FAILURE_EXIT;
         }
 
-        if ($failOnSelfDeprecation && $result->hasSelfDeprecations()) {
-            $returnCode = self::FAILURE_EXIT;
-        }
-
-        if ($failOnDirectDeprecation && $result->hasDirectDeprecations()) {
-            $returnCode = self::FAILURE_EXIT;
-        }
-
-        if ($failOnIndirectDeprecation && $result->hasIndirectDeprecations()) {
-            $returnCode = self::FAILURE_EXIT;
-        }
-
-        if ($failOnDeprecation && $result->hasDeprecationsWithUnknownTrigger()) {
+        if ($failOnDeprecation && $result->hasPhpOrUserDeprecations()) {
             $returnCode = self::FAILURE_EXIT;
         }
 

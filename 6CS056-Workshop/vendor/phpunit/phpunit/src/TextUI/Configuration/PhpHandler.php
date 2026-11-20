@@ -17,8 +17,6 @@ use function getenv;
 use function implode;
 use function ini_get;
 use function ini_set;
-use function is_array;
-use function is_scalar;
 use function putenv;
 use function restore_error_handler;
 use function set_error_handler;
@@ -71,11 +69,7 @@ final readonly class PhpHandler
             $value = $iniSetting->value();
 
             if (defined($value)) {
-                $constantValue = constant($value);
-
-                if (is_scalar($constantValue) || $constantValue === null) {
-                    $value = (string) $constantValue;
-                }
+                $value = (string) constant($value);
             }
 
             $error = '';
@@ -131,17 +125,9 @@ final readonly class PhpHandler
 
     private function handleVariables(string $target, VariableCollection $variables): void
     {
-        $values = [];
-
-        if (isset($GLOBALS[$target]) && is_array($GLOBALS[$target])) {
-            $values = $GLOBALS[$target];
-        }
-
         foreach ($variables as $variable) {
-            $values[$variable->name()] = $variable->value();
+            $GLOBALS[$target][$variable->name()] = $variable->value();
         }
-
-        $GLOBALS[$target] = $values;
     }
 
     private function handleEnvVariables(VariableCollection $variables): void
@@ -151,20 +137,14 @@ final readonly class PhpHandler
             $value = $variable->value();
             $force = $variable->force();
 
-            if (!is_scalar($value) && $value !== null) {
-                continue;
-            }
-
-            $valueAsString = (string) $value;
-
             if ($force || getenv($name) === false) {
-                putenv("{$name}={$valueAsString}");
+                putenv("{$name}={$value}");
             }
 
-            $valueAsString = getenv($name);
+            $value = getenv($name);
 
             if ($force || !isset($_ENV[$name])) {
-                $_ENV[$name] = $valueAsString;
+                $_ENV[$name] = $value;
             }
         }
     }

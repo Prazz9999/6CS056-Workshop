@@ -9,6 +9,8 @@
  */
 namespace PHPUnit\Runner\Filter;
 
+use function array_merge;
+use function array_push;
 use function in_array;
 use PHPUnit\Framework\Test;
 use PHPUnit\Framework\TestCase;
@@ -27,11 +29,7 @@ use RecursiveIterator;
 abstract class GroupFilterIterator extends RecursiveFilterIterator
 {
     /**
-     * The identifiers of the tests that are in one of the selected groups are
-     * used as keys so that looking one up does not become more expensive as
-     * more tests are selected.
-     *
-     * @var array<non-empty-string, true>
+     * @var list<non-empty-string>
      */
     private readonly array $groupTests;
 
@@ -46,13 +44,10 @@ abstract class GroupFilterIterator extends RecursiveFilterIterator
         $groupTests = [];
 
         foreach ($suite->groups() as $group => $tests) {
-            // the name of a group that is a number is an integer key
-            if (!in_array((string) $group, $groups, true)) {
-                continue;
-            }
+            if (in_array($group, $groups, true)) {
+                $groupTests = array_merge($groupTests, $tests);
 
-            foreach ($tests as $test) {
-                $groupTests[$test] = true;
+                array_push($groupTests, ...$groupTests);
             }
         }
 
@@ -75,8 +70,8 @@ abstract class GroupFilterIterator extends RecursiveFilterIterator
     }
 
     /**
-     * @param non-empty-string              $id
-     * @param array<non-empty-string, true> $groupTests
+     * @param non-empty-string       $id
+     * @param list<non-empty-string> $groupTests
      */
     abstract protected function doAccept(string $id, array $groupTests): bool;
 }

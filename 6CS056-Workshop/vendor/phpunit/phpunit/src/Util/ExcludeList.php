@@ -10,11 +10,11 @@
 namespace PHPUnit\Util;
 
 use const PHP_OS_FAMILY;
-use function array_any;
 use function assert;
 use function class_exists;
 use function defined;
 use function dirname;
+use function interface_exists;
 use function is_dir;
 use function realpath;
 use function str_starts_with;
@@ -66,7 +66,7 @@ final class ExcludeList
         Parser::class => 1,
 
         // phar-io/manifest
-        Manifest::class => 1,
+        Manifest::class => 2,
 
         // phar-io/version
         PharIoVersion::class => 1,
@@ -187,10 +187,13 @@ final class ExcludeList
 
         self::initialize();
 
-        return array_any(
-            self::$directories,
-            static fn (string $directory) => str_starts_with($file, $directory),
-        );
+        foreach (self::$directories as $directory) {
+            if (str_starts_with($file, $directory)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function initialize(): void
@@ -200,17 +203,11 @@ final class ExcludeList
         }
 
         foreach (self::EXCLUDED_CLASS_NAMES as $className => $parent) {
-            if (!class_exists($className)) {
+            if (!class_exists($className) && !interface_exists($className)) {
                 continue;
             }
 
-            $directory = new ReflectionClass($className)->getFileName();
-
-            if ($directory === false) {
-                // @codeCoverageIgnoreStart
-                continue;
-                // @codeCoverageIgnoreEnd
-            }
+            $directory = (new ReflectionClass($className))->getFileName();
 
             for ($i = 0; $i < $parent; $i++) {
                 $directory = dirname($directory);

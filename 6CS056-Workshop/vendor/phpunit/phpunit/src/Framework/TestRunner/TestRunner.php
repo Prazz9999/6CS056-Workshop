@@ -7,26 +7,17 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  */
-namespace PHPUnit\Framework\TestRunner;
+namespace PHPUnit\Framework;
 
-use const DIRECTORY_SEPARATOR;
 use const PHP_EOL;
 use function array_diff_assoc;
 use function array_intersect;
 use function array_unique;
-use function assert;
 use function extension_loaded;
-use function realpath;
 use function sprintf;
-use function str_starts_with;
 use function xdebug_is_debugger_active;
 use AssertionError;
 use PHPUnit\Event\Facade;
-use PHPUnit\Framework\Assert;
-use PHPUnit\Framework\AssertionFailedError;
-use PHPUnit\Framework\IncompleteTestError;
-use PHPUnit\Framework\SkippedTest;
-use PHPUnit\Framework\TestCase;
 use PHPUnit\Metadata\Api\CodeCoverage as CodeCoverageMetadataApi;
 use PHPUnit\Metadata\Parser\Registry as MetadataRegistry;
 use PHPUnit\Runner\CodeCoverage;
@@ -34,10 +25,8 @@ use PHPUnit\Runner\ErrorHandler;
 use PHPUnit\Runner\Exception;
 use PHPUnit\TextUI\Configuration\Configuration;
 use PHPUnit\TextUI\Configuration\Registry as ConfigurationRegistry;
-use PHPUnit\TextUI\Configuration\SourceFilter;
 use SebastianBergmann\CodeCoverage\Exception as CodeCoverageException;
 use SebastianBergmann\CodeCoverage\InvalidArgumentException;
-use SebastianBergmann\CodeCoverage\Test\Target\Target;
 use SebastianBergmann\CodeCoverage\Test\Target\TargetCollection;
 use SebastianBergmann\CodeCoverage\UnintentionallyCoveredCodeException;
 use SebastianBergmann\Invoker\Invoker;
@@ -51,6 +40,7 @@ use Throwable;
  */
 final class TestRunner
 {
+    private ?bool $timeLimitCanBeEnforced = null;
     private readonly Configuration $configuration;
 
     public function __construct()
@@ -67,35 +57,21 @@ final class TestRunner
     {
         Assert::resetCount();
 
-        $codeCoverageMetadataApi    = new CodeCoverageMetadataApi;
-        $coversTargets              = TargetCollection::fromArray([]);
-        $usesTargets                = TargetCollection::fromArray([]);
-        $coversNothingContradiction = false;
+        $codeCoverageMetadataApi = new CodeCoverageMetadataApi;
 
-        if ($this->configuration->disableCoverageTargeting()) {
-            $shouldCodeCoverageBeCollected = true;
-        } else {
-            $coversTargets = $codeCoverageMetadataApi->coversTargets(
-                $test::class,
-                $test->name(),
-            );
+        $coversTargets = $codeCoverageMetadataApi->coversTargets(
+            $test::class,
+            $test->name(),
+        );
 
-            $usesTargets = $codeCoverageMetadataApi->usesTargets(
-                $test::class,
-                $test->name(),
-            );
+        $usesTargets = $codeCoverageMetadataApi->usesTargets(
+            $test::class,
+            $test->name(),
+        );
 
-            $coversTargets = $this->removeFilesystemTargetsThatAreNotFirstPartyCode($test, $coversTargets);
-            $usesTargets   = $this->removeFilesystemTargetsThatAreNotFirstPartyCode($test, $usesTargets);
+        $shouldCodeCoverageBeCollected = $codeCoverageMetadataApi->shouldCodeCoverageBeCollectedFor($test);
 
-            $shouldCodeCoverageBeCollected = $codeCoverageMetadataApi->shouldCodeCoverageBeCollectedFor($test);
-
-            $coversNothingContradiction = $codeCoverageMetadataApi->coversNothingContradictsCoversOrUses(
-                $test::class,
-            );
-        }
-
-        $this->performSanityChecks($test, $coversTargets, $usesTargets, $coversNothingContradiction);
+        $this->performSanityChecks($test, $coversTargets, $usesTargets, $shouldCodeCoverageBeCollected);
 
         $error      = false;
         $failure    = false;
@@ -104,11 +80,7 @@ final class TestRunner
         $skipped    = false;
 
         if ($this->shouldErrorHandlerBeUsed($test)) {
-            $throwableFromDeferredIssue = ErrorHandler::instance()->enable($test);
-
-            if ($throwableFromDeferredIssue !== null) {
-                $test->setThrowableFromDeferredIssue($throwableFromDeferredIssue);
-            }
+            ErrorHandler::instance()->enable($test);
         }
 
         $collectCodeCoverage = CodeCoverage::instance()->isActive() &&
@@ -133,34 +105,23 @@ final class TestRunner
             } elseif ($e instanceof SkippedTest) {
                 $skipped = true;
             }
-        } catch (AssertionError $e) {
+        } catch (AssertionError) {
             $test->addToAssertionCount(1);
 
             $failure = true;
-            $trace   = $e->getTrace();
-
-            assert(isset($trace[0]));
-
-            $frame = $trace[0];
-
-            assert(isset($frame['file']));
-            assert(isset($frame['line']));
-
-            $e = new AssertionFailedError(
-                sprintf(
-                    '%s in %s:%s',
-                    $e->getMessage(),
-                    $frame['file'],
-                    $frame['line'],
-                ),
-            );
-        } catch (Throwable $e) {
+        } catch (Throwable) {
             $error = true;
+        }
+
+        // TestCase::runBare() does not pass on an exception of a registered failure type
+        if ($test->status()->isFailure()) {
+            $failure = true;
         }
 
         $test->addToAssertionCount(Assert::getCount());
 
-        if ($this->configuration->reportUselessTests() &&
+        if (!$failure &&
+            $this->configuration->reportUselessTests() &&
             !$test->doesNotPerformAssertions() &&
             $test->numberOfAssertionsPerformed() === 0) {
             $risky = true;
@@ -178,8 +139,7 @@ final class TestRunner
         }
 
         if ($collectCodeCoverage) {
-            $append                 = !$risky && !$incomplete && !$skipped;
-            $coveredUnintentionally = false;
+            $append = !$risky && !$incomplete && !$skipped;
 
             if (!$append) {
                 $coversTargets = false;
@@ -193,35 +153,21 @@ final class TestRunner
                     $usesTargets,
                 );
             } catch (UnintentionallyCoveredCodeException $cce) {
-                $coveredUnintentionally = true;
-
                 Facade::emitter()->testConsideredRisky(
                     $test->valueObjectForEvents(),
                     'This test executed code that is not listed as code to be covered or used:' .
                     PHP_EOL .
                     $cce->getMessage(),
                 );
-            } catch (CodeCoverageException $cce) {
+            } catch (CodeCoverageException) {
                 $error = true;
-
-                $e = $e ?? $cce;
-            }
-
-            if ($append && !$error && !$failure && !$coveredUnintentionally &&
-                $this->configuration->requireCoverageContribution() &&
-                !CodeCoverage::instance()->lastTestContributedToCoverage()) {
-                Facade::emitter()->testConsideredRisky(
-                    $test->valueObjectForEvents(),
-                    'This test does not contribute to code coverage',
-                );
-
-                $risky = true;
             }
         }
 
         ErrorHandler::instance()->disable();
 
         if (!$error &&
+            !$failure &&
             !$incomplete &&
             !$skipped &&
             $this->configuration->reportUselessTests() &&
@@ -302,18 +248,6 @@ final class TestRunner
                 return true;
             }
 
-            if ($metadata->isCoversFile()) {
-                return true;
-            }
-
-            if ($metadata->isCoversDirectory()) {
-                return true;
-            }
-
-            if ($metadata->isCoversDirectoryRecursively()) {
-                return true;
-            }
-
             if ($metadata->isCoversNothing()) {
                 return true;
             }
@@ -324,7 +258,13 @@ final class TestRunner
 
     private function canTimeLimitBeEnforced(): bool
     {
-        return (new Invoker)->canInvokeWithTimeout();
+        if ($this->timeLimitCanBeEnforced !== null) {
+            return $this->timeLimitCanBeEnforced;
+        }
+
+        $this->timeLimitCanBeEnforced = (new Invoker)->canInvokeWithTimeout();
+
+        return $this->timeLimitCanBeEnforced;
     }
 
     private function shouldTimeLimitBeEnforced(TestCase $test): bool
@@ -338,11 +278,7 @@ final class TestRunner
         }
 
         if (extension_loaded('xdebug') && xdebug_is_debugger_active()) {
-            // a debugging session cannot be active while the tests for PHPUnit
-            // itself are run
-            // @codeCoverageIgnoreStart
             return false;
-            // @codeCoverageIgnoreEnd
         }
 
         return true;
@@ -365,7 +301,7 @@ final class TestRunner
         }
 
         try {
-            (new Invoker)->invoke($test->runBare(...), [], $_timeout);
+            (new Invoker)->invoke([$test, 'runBare'], [], $_timeout);
         } catch (TimeoutException) {
             Facade::emitter()->testConsideredRisky(
                 $test->valueObjectForEvents(),
@@ -391,13 +327,15 @@ final class TestRunner
         return true;
     }
 
-    private function performSanityChecks(TestCase $test, TargetCollection $coversTargets, TargetCollection $usesTargets, bool $coversNothingContradiction): void
+    private function performSanityChecks(TestCase $test, TargetCollection $coversTargets, TargetCollection $usesTargets, bool $shouldCodeCoverageBeCollected): void
     {
-        if ($coversNothingContradiction) {
-            Facade::emitter()->testTriggeredPhpunitWarning(
-                $test->valueObjectForEvents(),
-                '#[Covers*] and #[Uses*] attributes do not have an effect when the #[CoversNothing] attribute is used',
-            );
+        if (!$shouldCodeCoverageBeCollected) {
+            if ($coversTargets->isNotEmpty() || $usesTargets->isNotEmpty()) {
+                Facade::emitter()->testTriggeredPhpunitWarning(
+                    $test->valueObjectForEvents(),
+                    '#[Covers*] and #[Uses*] attributes do not have an effect when the #[CoversNothing] attribute is used',
+                );
+            }
         }
 
         $coversAsString = [];
@@ -444,78 +382,5 @@ final class TestRunner
                 ),
             );
         }
-    }
-
-    private function removeFilesystemTargetsThatAreNotFirstPartyCode(TestCase $test, TargetCollection $targets): TargetCollection
-    {
-        if (!$this->configuration->source()->notEmpty()) {
-            return $targets;
-        }
-
-        $filteredTargets = [];
-        $warnings        = [];
-
-        foreach ($targets as $target) {
-            if ($this->isFilesystemTargetThatIsNotFirstPartyCode($target)) {
-                $warnings[] = sprintf(
-                    '%s is outside of the code that is configured to be first-party code using <source>, the attribute is ignored',
-                    $target->description(),
-                );
-
-                continue;
-            }
-
-            $filteredTargets[] = $target;
-        }
-
-        foreach (array_unique($warnings) as $warning) {
-            Facade::emitter()->testTriggeredPhpunitWarning(
-                $test->valueObjectForEvents(),
-                $warning,
-            );
-        }
-
-        return TargetCollection::fromArray($filteredTargets);
-    }
-
-    private function isFilesystemTargetThatIsNotFirstPartyCode(Target $target): bool
-    {
-        if (!$target->isFile() && !$target->isDirectory() && !$target->isDirectoryRecursively()) {
-            return false;
-        }
-
-        $path = realpath($target->target());
-
-        if ($path === false) {
-            // paths that cannot be resolved are reported by phpunit/php-code-coverage's target validation
-            return false;
-        }
-
-        if ($target->isFile()) {
-            return !SourceFilter::instance()->includes($path);
-        }
-
-        return !$this->isDirectoryConfiguredAsFirstPartyCode($path);
-    }
-
-    private function isDirectoryConfiguredAsFirstPartyCode(string $directory): bool
-    {
-        foreach ($this->configuration->source()->includeDirectories() as $includeDirectory) {
-            $includeDirectoryPath = realpath($includeDirectory->path());
-
-            if ($includeDirectoryPath === false) {
-                continue;
-            }
-
-            if ($directory === $includeDirectoryPath) {
-                return true;
-            }
-
-            if (str_starts_with($directory, $includeDirectoryPath . DIRECTORY_SEPARATOR)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 }

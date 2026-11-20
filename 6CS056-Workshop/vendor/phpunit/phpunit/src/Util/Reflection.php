@@ -9,6 +9,7 @@
  */
 namespace PHPUnit\Util;
 
+use function array_keys;
 use function array_merge;
 use function array_reverse;
 use function assert;
@@ -50,19 +51,6 @@ final readonly class Reflection
             'file' => $file,
             'line' => $line,
         ];
-    }
-
-    /**
-     * A hook method that is not declared by the test class, or that is only
-     * declared by TestCase itself, must not be invoked as a hook method.
-     *
-     * @param ReflectionClass<TestCase> $class
-     * @param non-empty-string          $methodName
-     */
-    public static function methodDoesNotExistOrIsDeclaredInTestCase(ReflectionClass $class, string $methodName): bool
-    {
-        return !$class->hasMethod($methodName) ||
-               $class->getMethod($methodName)->getDeclaringClass()->getName() === TestCase::class;
     }
 
     /**
@@ -112,14 +100,16 @@ final readonly class Reflection
             $methodsByClass[$declaringClassName][] = $method;
         }
 
+        $classNames = array_keys($methodsByClass);
+
         if ($sortHighestToLowest) {
-            $methodsByClass = array_reverse($methodsByClass);
+            $classNames = array_reverse($classNames);
         }
 
         $methods = [];
 
-        foreach ($methodsByClass as $classMethods) {
-            $methods = array_merge($methods, $classMethods);
+        foreach ($classNames as $className) {
+            $methods = array_merge($methods, $methodsByClass[$className]);
         }
 
         return $methods;
