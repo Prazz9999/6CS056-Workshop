@@ -1,14 +1,16 @@
-<nav class="navbar">
-    <a href="{{ url('/') }}" class="brand">Training Institute</a>
+<nav>
+    @guest
+        <a href="/register">Register</a>
+        <a href="/login">Login</a>
+    @endguest
 
-    <div>
-        <a href="{{ route('students.index') }}"
-           class="{{ request()->routeIs('students.*') ? 'active' : '' }}">
-            Students
-        </a>
-        <a href="{{ route('courses.index') }}"
-           class="{{ request()->routeIs('courses.*') ? 'active' : '' }}">
-            Courses
-        </a>
-    </div>
+    @auth
+        <a href="/courses">Courses</a>
+        <a href="/students">Students</a>
+
+        <form action="/logout" method="POST" style="display: inline;">
+            @csrf
+            <button type="submit">Log Out</button>
+        </form>
+    @endauth
 </nav>

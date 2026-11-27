@@ -1,6 +1,7 @@
 <?php
 
 namespace App\Models;
+use App\Models\Course;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Database\Factories\UserFactory;
@@ -29,4 +30,9 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+    public function courses()
+    {
+        return $this->hasMany(Course::class);
+    }
 }
+

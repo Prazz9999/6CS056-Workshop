@@ -1,44 +1,60 @@
 <?php
 
 namespace App\Http\Controllers;
-
+use Illuminate\Support\Facades\Gate;
 use App\Models\Course;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 class CourseController extends Controller
 {
-    public function index()
+    // Display courses
+    public function index(Request $request)
     {
-        return view('course.list', ['courses' => Course::all()]);
+        $courses = $request->user()->role === 'admin'
+            ? Course::latest()->get()
+            : $request->user()->courses()->latest()->get();
+
+        return view('course.list', ['courses' => $courses]);
     }
+
+    // Show create course form
 
     public function create()
     {
         return view('course.create');
     }
 
+    // Store new course
     public function store(Request $request)
     {
-        $course = Course::create($request->validate($this->rules()));
+        $validated = $request->validate($this->rules());
+
+        $course = $request->user()->courses()->create($validated);
 
         return redirect()
             ->route('courses.index')
             ->with('success', "Course {$course->name} created successfully!");
     }
 
+    // Show individual course
     public function show(Course $course)
     {
+        Gate::authorize('manage-course', $course);
         return view('course.detail', ['course' => $course]);
     }
 
+    // Show edit form
     public function edit(Course $course)
     {
+        Gate::authorize('manage-course', $course);
         return view('course.edit', ['course' => $course]);
     }
 
+    // Update course
     public function update(Request $request, Course $course)
     {
+        Gate::authorize('manage-course', $course);
         $course->update($request->validate($this->rules()));
 
         return redirect()
@@ -46,8 +62,10 @@ class CourseController extends Controller
             ->with('success', 'Course updated successfully!');
     }
 
+    // Delete course
     public function destroy(Course $course)
     {
+        Gate::authorize('manage-course', $course);
         $course->delete();
 
         return redirect()
@@ -55,6 +73,7 @@ class CourseController extends Controller
             ->with('success', 'Course deleted successfully!');
     }
 
+    // Validation rules
     private function rules(): array
     {
         return [

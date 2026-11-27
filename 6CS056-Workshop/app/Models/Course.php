@@ -1,6 +1,7 @@
 <?php
 
 namespace App\Models;
+use App\Models\User;
 
 use Illuminate\Database\Eloquent\Model;
 
@@ -21,5 +22,9 @@ class Course extends Model
             'is_active' => 'boolean',
             'fee'       => 'decimal:2',
         ];
+    }
+    public function user()
+    {
+        return $this->belongsTo(User::class);
     }
 }
